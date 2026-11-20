@@ -3301,7 +3301,7 @@ static float MoverCastCallback( const b2BoxCastInput* input, int proxyId, uint64
 	b2WorldTransform bodyTransform = b2GetBodyTransformQuick( world, body );
 	b2Transform transform = b2ToRelativeTransform( bodyTransform, worldContext->origin );
 
-	b2CastOutput output = b2ShapeCastShape( &localInput, shape, transform );
+	b2CastOutput output = b2ShapeCastShapeOneSided( &localInput, shape, transform );
 	if ( output.fraction == 0.0f )
 	{
 		// Ignore overlapping shapes

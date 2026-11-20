@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/liiing/feedback/uid31385/build-base/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-base/src/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-base/shared/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-base/test/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

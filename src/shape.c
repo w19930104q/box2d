@@ -1108,29 +1108,11 @@ b2CastOutput b2ShapeCastShape( const b2ShapeCastInput* input, const b2Shape* sha
 			output = b2CastShapeSegment( &shape->segment, &localInput );
 			break;
 		case b2_chainSegmentShape:
-		{
-			// Check for back side collision
-			b2Vec2 approximateCentroid = localInput.proxy.points[0];
-			for ( int i = 1; i < localInput.proxy.count; ++i )
-			{
-				approximateCentroid = b2Add( approximateCentroid, localInput.proxy.points[i] );
-			}
-
-			approximateCentroid = b2MulSV( 1.0f / localInput.proxy.count, approximateCentroid );
-
-			b2Vec2 edge =
-				b2Sub( shape->chainSegment.segment.point2, shape->chainSegment.segment.point1 );
-			b2Vec2 r = b2Sub( approximateCentroid, shape->chainSegment.segment.point1 );
-
-			if ( b2Cross( r, edge ) < 0.0f )
-			{
-				// Shape cast starts behind
-				return output;
-			}
-
+			// Shape casts against chain segments are two-sided: a cast from either side of the
+			// edge must hit, and b2CastShape reports the normal facing the swept shape. The
+			// one-sided front-only behavior used by the mover lives in b2ShapeCastShapeOneSided.
 			output = b2CastShapeSegment( &shape->chainSegment.segment, &localInput );
-		}
-		break;
+			break;
 		default:
 			return output;
 	}
@@ -1139,6 +1121,41 @@ b2CastOutput b2ShapeCastShape( const b2ShapeCastInput* input, const b2Shape* sha
 	output.point = b2TransformPoint( transform, output.point );
 	output.normal = b2RotateVector( transform.q, output.normal );
 	return output;
+}
+
+// One-sided shape cast for the capsule mover. A chain segment only collides from its front side,
+// matching b2CollideMover and chain contacts. Other shape types are two-sided and delegate to the
+// regular cast. The back side test runs in the input (relative) frame: rotations preserve the
+// cross product sign, so it gives the same answer as the equivalent local-frame test.
+b2CastOutput b2ShapeCastShapeOneSided( const b2ShapeCastInput* input, const b2Shape* shape,
+									   b2Transform transform )
+{
+	b2CastOutput output = { 0 };
+
+	if ( input->proxy.count == 0 || shape->type != b2_chainSegmentShape )
+	{
+		return b2ShapeCastShape( input, shape, transform );
+	}
+
+	b2Vec2 approximateCentroid = input->proxy.points[0];
+	for ( int i = 1; i < input->proxy.count; ++i )
+	{
+		approximateCentroid = b2Add( approximateCentroid, input->proxy.points[i] );
+	}
+	approximateCentroid = b2MulSV( 1.0f / input->proxy.count, approximateCentroid );
+
+	b2Vec2 segmentP1 = b2TransformPoint( transform, shape->chainSegment.segment.point1 );
+	b2Vec2 segmentP2 = b2TransformPoint( transform, shape->chainSegment.segment.point2 );
+	b2Vec2 edge = b2Sub( segmentP2, segmentP1 );
+	b2Vec2 r = b2Sub( approximateCentroid, segmentP1 );
+
+	if ( b2Cross( r, edge ) < 0.0f )
+	{
+		// Shape cast starts behind the chain segment
+		return output;
+	}
+
+	return b2ShapeCastShape( input, shape, transform );
 }
 
 b2PlaneResult b2CollideMover( const b2Capsule* mover, const b2Shape* shape, b2Transform transform )

@@ -94,6 +94,10 @@ b2ShapeProxy b2MakeShapeDistanceProxy( const b2Shape* shape );
 b2CastOutput b2RayCastShape( const b2RayCastInput* input, const b2Shape* shape, b2Transform transform );
 b2CastOutput b2ShapeCastShape( const b2ShapeCastInput* input, const b2Shape* shape, b2Transform transform );
 
+// One-sided variant for the capsule mover: chain segments are only hit from their front side.
+b2CastOutput b2ShapeCastShapeOneSided( const b2ShapeCastInput* input, const b2Shape* shape,
+									   b2Transform transform );
+
 b2PlaneResult b2CollideMoverAndCircle( const b2Capsule* mover, const b2Circle* shape );
 b2PlaneResult b2CollideMoverAndCapsule( const b2Capsule* mover, const b2Capsule* shape );
 b2PlaneResult b2CollideMoverAndPolygon( const b2Capsule* mover, const b2Polygon* shape );

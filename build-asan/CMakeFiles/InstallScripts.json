@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/liiing/feedback/uid31385/build-asan/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-asan/src/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-asan/shared/cmake_install.cmake",
+		"/home/liiing/feedback/uid31385/build-asan/test/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

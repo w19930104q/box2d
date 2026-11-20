@@ -5,6 +5,7 @@
 
 #include "box2d/box2d.h"
 
+#include <math.h>
 #include <stdint.h>
 
 // The point array is the collidable surface and the ghosts sit outside it, so segment i spans
@@ -477,6 +478,353 @@ static int MoverOneSidedTest( void )
 	return 0;
 }
 
+// Shape casts have no front/back culling: both sides of every chain segment must hit, with the
+// normal facing the swept shape. The mover cast below keeps its own one-sided contract.
+typedef struct CastRecord
+{
+	int count;
+	b2Pos point;
+	b2Vec2 normal;
+	float fraction;
+} CastRecord;
+
+static float GatherCast( b2ShapeId shapeId, b2Pos point, b2Vec2 normal, float fraction, void* context )
+{
+	(void)shapeId;
+	CastRecord* record = context;
+	if ( record->count == 0 || fraction < record->fraction )
+	{
+		record->point = point;
+		record->normal = normal;
+		record->fraction = fraction;
+	}
+	record->count += 1;
+	return record->fraction;
+}
+
+// Open chain with a horizontal edge (4,0)->(0,0), front side facing +y, and a slanted edge after
+// it, so multiple segments and both endpoints are exercised.
+static b2ChainId CreateCastChain( b2BodyId bodyId )
+{
+	b2Vec2 points[3] = {
+		{ 4.0f, 0.0f },
+		{ 0.0f, 0.0f },
+		{ -2.0f, 1.0f },
+	};
+	b2ChainDef def = b2DefaultChainDef();
+	def.points = points;
+	def.pointCount = 3;
+	def.isLoop = false;
+	def.ghost1 = (b2Vec2){ 6.0f, -1.0f };
+	def.ghost2 = (b2Vec2){ -4.0f, 2.0f };
+	return b2CreateChain( bodyId, &def );
+}
+
+// GJK conservative advancement stops when the cores are max(slop, radius - slop) apart, so the
+// hand-derived expected fraction uses the same target instead of a full-radius offset.
+static float CastStopTarget( float radius )
+{
+	return fmaxf( B2_LINEAR_SLOP, radius - B2_LINEAR_SLOP );
+}
+
+// Cast a circle proxy straight down/up at the horizontal edge from each side. The infinite-line
+// math is exact here: fraction is the travel until the circle center is one target from the edge.
+static int ShapeCastTwoSidedTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	b2BodyDef castBodyDef = b2DefaultBodyDef();
+	b2BodyId bodyId = b2CreateBody( worldId, &castBodyDef );
+	CreateCastChain( bodyId );
+
+	const float radius = 0.3f;
+	b2ShapeProxy proxy = { 0 };
+	proxy.points[0] = (b2Vec2){ 0.0f, 0.0f };
+	proxy.count = 1;
+	proxy.radius = radius;
+
+	const float start = 2.0f;
+	const float travel = 3.0f;
+	float expectedFraction = ( start - CastStopTarget( radius ) ) / travel;
+
+	// Front side: above the edge, swept downward.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ 2.0f, start }, &proxy, (b2Vec2){ 0.0f, -travel },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x, 1e-3f );
+		ENSURE_SMALL( record.normal.y - 1.0f, 1e-3f );
+		// Witness point sits on the radius-zero segment core.
+		ENSURE_SMALL( record.point.x - 2.0f, 1e-3f );
+		ENSURE_SMALL( record.point.y, 1e-3f );
+	}
+
+	// Back side: below the edge, swept upward. Baseline culled this and returned no hit.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ 2.0f, -start }, &proxy, (b2Vec2){ 0.0f, travel },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x, 1e-3f );
+		ENSURE_SMALL( record.normal.y + 1.0f, 1e-3f );
+		ENSURE_SMALL( record.point.x - 2.0f, 1e-3f );
+		ENSURE_SMALL( record.point.y, 1e-3f );
+	}
+
+	// A box proxy from the back side must hit too, proving the cull removal is not circle-specific.
+	{
+		b2ShapeProxy box = { 0 };
+		box.count = 4;
+		box.radius = 0.0f;
+		box.points[0] = (b2Vec2){ -0.2f, -0.2f };
+		box.points[1] = (b2Vec2){ 0.2f, -0.2f };
+		box.points[2] = (b2Vec2){ 0.2f, 0.2f };
+		box.points[3] = (b2Vec2){ -0.2f, 0.2f };
+
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ 2.0f, -2.0f }, &box, (b2Vec2){ 0.0f, 3.0f },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE( record.fraction > 0.0f && record.fraction < 1.0f );
+		ENSURE_SMALL( record.normal.y + 1.0f, 1e-3f );
+	}
+
+	b2DestroyWorld( worldId );
+	return 0;
+}
+
+// The slanted edge (0,0)->(-2,1): casts are aimed along its hand-computed unit normals from both
+// sides, so the returned normal and fraction can be checked against exact geometry.
+static int ShapeCastSlantedEdgeTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	b2BodyDef castBodyDef = b2DefaultBodyDef();
+	b2BodyId bodyId = b2CreateBody( worldId, &castBodyDef );
+	CreateCastChain( bodyId );
+
+	const float radius = 0.25f;
+	b2ShapeProxy proxy = { 0 };
+	proxy.points[0] = (b2Vec2){ 0.0f, 0.0f };
+	proxy.count = 1;
+	proxy.radius = radius;
+
+	// Edge vector e = (-2, 1); right perpendicular is (1, 2), the front normal.
+	float edgeLength = sqrtf( 5.0f );
+	b2Vec2 frontNormal = { 1.0f / edgeLength, 2.0f / edgeLength };
+	b2Vec2 backNormal = { -frontNormal.x, -frontNormal.y };
+	b2Vec2 midpoint = { -1.0f, 0.5f };
+
+	const float standoff = 1.5f;
+	const float travel = 2.0f;
+	float expectedFraction = ( standoff - CastStopTarget( radius ) ) / travel;
+
+	{
+		b2Pos start = { midpoint.x + standoff * frontNormal.x, midpoint.y + standoff * frontNormal.y };
+		b2Vec2 translation = { -travel * frontNormal.x, -travel * frontNormal.y };
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, start, &proxy, translation, b2DefaultQueryFilter(), GatherCast,
+						   &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x - frontNormal.x, 1e-3f );
+		ENSURE_SMALL( record.normal.y - frontNormal.y, 1e-3f );
+		ENSURE_SMALL( record.point.x - midpoint.x, 1e-3f );
+		ENSURE_SMALL( record.point.y - midpoint.y, 1e-3f );
+	}
+
+	{
+		b2Pos start = { midpoint.x + standoff * backNormal.x, midpoint.y + standoff * backNormal.y };
+		b2Vec2 translation = { -travel * backNormal.x, -travel * backNormal.y };
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, start, &proxy, translation, b2DefaultQueryFilter(), GatherCast,
+						   &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x - backNormal.x, 1e-3f );
+		ENSURE_SMALL( record.normal.y - backNormal.y, 1e-3f );
+		ENSURE_SMALL( record.point.x - midpoint.x, 1e-3f );
+		ENSURE_SMALL( record.point.y - midpoint.y, 1e-3f );
+	}
+
+	b2DestroyWorld( worldId );
+	return 0;
+}
+
+// Back-side casts aimed just inside both endpoints must still register a hit instead of slipping
+// off the cap region where the old centroid cull used to discard them.
+static int ShapeCastEndpointTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	b2BodyDef castBodyDef = b2DefaultBodyDef();
+	b2BodyId bodyId = b2CreateBody( worldId, &castBodyDef );
+	CreateCastChain( bodyId );
+
+	const float radius = 0.1f;
+	b2ShapeProxy proxy = { 0 };
+	proxy.points[0] = (b2Vec2){ 0.0f, 0.0f };
+	proxy.count = 1;
+	proxy.radius = radius;
+
+	const float standoff = 0.8f;
+	float expectedFraction = ( standoff - CastStopTarget( radius ) ) / 1.0f;
+
+	// Near the right endpoint x=4 and the left corner x=0, 0.05 inward so the edge interior is hit.
+	float endpointX[2] = { 3.95f, 0.05f };
+	for ( int i = 0; i < 2; ++i )
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ endpointX[i], -standoff }, &proxy, (b2Vec2){ 0.0f, 1.0f },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x, 1e-3f );
+		ENSURE_SMALL( record.normal.y + 1.0f, 1e-3f );
+		ENSURE_SMALL( record.point.x - endpointX[i], 1e-3f );
+		ENSURE_SMALL( record.point.y, 1e-3f );
+	}
+
+	b2DestroyWorld( worldId );
+	return 0;
+}
+
+// A closed loop is one-sided for contacts and ray casts, but shape casts from inside the loop must
+// reach the back side of the boundary. Outside casts keep their outward normals.
+static int ShapeCastLoopTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	b2BodyDef castBodyDef = b2DefaultBodyDef();
+	b2BodyId bodyId = b2CreateBody( worldId, &castBodyDef );
+
+	b2Vec2 points[4] = {
+		{ -2.0f, -2.0f },
+		{ 2.0f, -2.0f },
+		{ 2.0f, 2.0f },
+		{ -2.0f, 2.0f },
+	};
+	b2ChainDef def = b2DefaultChainDef();
+	def.points = points;
+	def.pointCount = 4;
+	def.isLoop = true;
+	b2CreateChain( bodyId, &def );
+
+	const float radius = 0.2f;
+	b2ShapeProxy proxy = { 0 };
+	proxy.points[0] = (b2Vec2){ 0.0f, 0.0f };
+	proxy.count = 1;
+	proxy.radius = radius;
+
+	const float standoff = 2.0f;
+	const float travel = 3.0f;
+	float expectedFraction = ( standoff - CastStopTarget( radius ) ) / travel;
+
+	// Outside the bottom edge, swept upward: outward normal is -y.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ 0.0f, -4.0f }, &proxy, (b2Vec2){ 0.0f, travel },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.y + 1.0f, 1e-3f );
+		ENSURE_SMALL( record.point.y + 2.0f, 1e-3f );
+	}
+
+	// Inside the loop, swept downward at the bottom edge: this is its back side.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ 0.0f, 0.0f }, &proxy, (b2Vec2){ 0.0f, -travel },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.y - 1.0f, 1e-3f );
+		ENSURE_SMALL( record.point.y + 2.0f, 1e-3f );
+	}
+
+	b2DestroyWorld( worldId );
+	return 0;
+}
+
+// The back-side side test is done in the relative frame, so a rotated body must classify sides the
+// same as an unrotated one. Rotate the horizontal chain 90 degrees CCW and cast from both sides.
+static int ShapeCastRotatedBodyTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+
+	b2BodyDef bodyDef = b2DefaultBodyDef();
+	bodyDef.rotation = b2MakeRot( 0.5f * B2_PI );
+	b2BodyId bodyId = b2CreateBody( worldId, &bodyDef );
+	CreateCastChain( bodyId );
+
+	const float radius = 0.3f;
+	b2ShapeProxy proxy = { 0 };
+	proxy.points[0] = (b2Vec2){ 0.0f, 0.0f };
+	proxy.count = 1;
+	proxy.radius = radius;
+
+	// Local front normal +y rotates to world -x; the edge midpoint (2,0) rotates to world (0,2).
+	const float standoff = 2.0f;
+	const float travel = 3.0f;
+	float expectedFraction = ( standoff - CastStopTarget( radius ) ) / travel;
+
+	// World front side is -x of the rotated edge.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ -standoff, 2.0f }, &proxy, (b2Vec2){ travel, 0.0f },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x + 1.0f, 1e-3f );
+		ENSURE_SMALL( record.normal.y, 1e-3f );
+		ENSURE_SMALL( record.point.y - 2.0f, 1e-3f );
+	}
+
+	// World back side is +x of the rotated edge.
+	{
+		CastRecord record = { 0 };
+		b2World_CastShape( worldId, (b2Pos){ standoff, 2.0f }, &proxy, (b2Vec2){ -travel, 0.0f },
+						   b2DefaultQueryFilter(), GatherCast, &record );
+		ENSURE( record.count == 1 );
+		ENSURE_SMALL( record.fraction - expectedFraction, 1e-3f );
+		ENSURE_SMALL( record.normal.x - 1.0f, 1e-3f );
+		ENSURE_SMALL( record.normal.y, 1e-3f );
+		ENSURE_SMALL( record.point.y - 2.0f, 1e-3f );
+	}
+
+	b2DestroyWorld( worldId );
+	return 0;
+}
+
+// The mover keeps the original one-sided behavior even though generic shape casts are two-sided:
+// a front cast reports a fraction below one while a back cast returns the full fraction (no hit).
+static int MoverCastOneSidedTest( void )
+{
+	b2WorldDef worldDef = b2DefaultWorldDef();
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	b2BodyDef castBodyDef = b2DefaultBodyDef();
+	b2BodyId bodyId = b2CreateBody( worldId, &castBodyDef );
+	CreateCastChain( bodyId );
+
+	b2Capsule mover = { { -0.3f, 0.0f }, { 0.3f, 0.0f }, 0.25f };
+
+	float front = b2World_CastMover( worldId, (b2Pos){ 2.0f, 2.0f }, &mover, (b2Vec2){ 0.0f, -3.0f },
+									 b2DefaultQueryFilter() );
+	float back = b2World_CastMover( worldId, (b2Pos){ 2.0f, -2.0f }, &mover, (b2Vec2){ 0.0f, 3.0f },
+									b2DefaultQueryFilter() );
+
+	b2DestroyWorld( worldId );
+
+	ENSURE( front > 0.0f && front < 1.0f );
+	ENSURE( back == 1.0f );
+
+	return 0;
+}
+
 static float LoopArea( const b2ChainData* chain )
 {
 	float area = 0.0f;
@@ -677,6 +1025,12 @@ int ChainTest( void )
 	result |= RunChainSubtest( "SingleMaterialTest", SingleMaterialTest );
 	result |= RunChainSubtest( "DegenerateGhostTest", DegenerateGhostTest );
 	result |= RunChainSubtest( "MoverOneSidedTest", MoverOneSidedTest );
+	result |= RunChainSubtest( "ShapeCastTwoSidedTest", ShapeCastTwoSidedTest );
+	result |= RunChainSubtest( "ShapeCastSlantedEdgeTest", ShapeCastSlantedEdgeTest );
+	result |= RunChainSubtest( "ShapeCastEndpointTest", ShapeCastEndpointTest );
+	result |= RunChainSubtest( "ShapeCastLoopTest", ShapeCastLoopTest );
+	result |= RunChainSubtest( "ShapeCastRotatedBodyTest", ShapeCastRotatedBodyTest );
+	result |= RunChainSubtest( "MoverCastOneSidedTest", MoverCastOneSidedTest );
 	result |= RunChainSubtest( "ComputeChainsTest", ComputeChainsTest );
 
 	return result;
